@@ -74,7 +74,7 @@ def get_first_valid(series):
             return str(v).strip()
     return "-"
 
-def generate_printable_html(integrated_df, display_cols, total_sales, order_sales, quote_sales, total_row_count, yearly_summary):
+def generate_printable_html(integrated_df, display_cols, total_sales, order_sales, quote_sales, yearly_summary):
     rows_html = []
     for _, r in integrated_df.iterrows():
         row_type = r.get("_row_type", "data")
@@ -153,7 +153,6 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
         <div class="kpi-card"><div class="kpi-title">통합 총 매출규모</div><div class="kpi-value">₩{total_sales:,.0f}</div></div>
         <div class="kpi-card"><div class="kpi-title">💼 수주 확정액</div><div class="kpi-value">₩{order_sales:,.0f}</div></div>
         <div class="kpi-card"><div class="kpi-title">📋 견적 예상액</div><div class="kpi-value">₩{quote_sales:,.0f}</div></div>
-        <div class="kpi-card"><div class="kpi-title">통합 집계 항목수</div><div class="kpi-value">{total_row_count:,} 건</div></div>
         {yearly_cards_html}
     </div>
     <table>
@@ -165,7 +164,7 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
     return html_content
 
 # ---------------------------------------------------------
-# 📥 1. 수주대장 로더 (PO No.만 정확히 추출)
+# 📥 1. 수주대장 로더
 # ---------------------------------------------------------
 def load_order_ledger(folder_path="."):
     target_file = None
@@ -201,7 +200,6 @@ def load_order_ledger(folder_path="."):
             new_cols.append("매출월")
         elif "수주처" in c_str or "견적처" in c_str:
             new_cols.append("거래처")
-        # 관리코드는 제외하고 순수 PO No.만 매핑
         elif "PO NO" in c_str.upper() or "PONO" in c_str.upper():
             new_cols.append("PO_견적_번호")
         else:
@@ -245,26 +243,23 @@ def load_order_ledger(folder_path="."):
     ].copy()
 
     df["구분"] = "수주"
-    df["건수"] = 1
     df["_년도_정렬키"] = df["매출년도"].apply(extract_year_num)
     df["_월_정렬키"] = df["매출월"].apply(extract_month_num)
     df["프로젝트명_정제"] = df["프로젝트명"].apply(clean_project_name)
 
-    # 같은 년/월/거래처/프로젝트명 단위로 그룹핑
     group_keys = ["_년도_정렬키", "_월_정렬키", "매출년도", "매출월", "구분", "거래처", "프로젝트명_정제"]
     df_grouped = df.groupby(group_keys, as_index=False, dropna=False).agg({
         "수주현황": get_first_valid,
         "PO_견적_번호": combine_unique_po,
         "프로젝트명": get_representative_project_name,
         "내용": combine_unique,
-        "매출금액": "sum",
-        "건수": lambda s: f"{len(s)}건"
+        "매출금액": "sum"
     })
 
     return df_grouped
 
 # ---------------------------------------------------------
-# 📥 2. 견적대장 로더 (견적 NO.만 정확히 추출)
+# 📥 2. 견적대장 로더
 # ---------------------------------------------------------
 def load_quote_ledger(folder_path="."):
     target_file = None
@@ -343,20 +338,17 @@ def load_quote_ledger(folder_path="."):
     ].copy()
 
     df["구분"] = "견적"
-    df["건수"] = 1
     df["_년도_정렬키"] = df["매출년도"].apply(extract_year_num)
     df["_월_정렬키"] = df["매출월"].apply(extract_month_num)
     df["프로젝트명_정제"] = df["프로젝트명"].apply(clean_project_name)
 
-    # 같은 년/월/거래처/프로젝트명 단위로 그룹핑
     group_keys = ["_년도_정렬키", "_월_정렬키", "매출년도", "매출월", "구분", "거래처", "프로젝트명_정제"]
     df_grouped = df.groupby(group_keys, as_index=False, dropna=False).agg({
         "수주현황": get_first_valid,
         "PO_견적_번호": combine_unique_po,
         "프로젝트명": get_representative_project_name,
         "내용": combine_unique,
-        "매출금액": "sum",
-        "건수": lambda s: f"{len(s)}건"
+        "매출금액": "sum"
     })
 
     return df_grouped
@@ -373,7 +365,6 @@ def load_combined_data():
     if combined_df.empty:
         raise FileNotFoundError("수주대장 또는 견적대장 엑셀 파일을 작업 폴더에서 찾을 수 없습니다.")
 
-    # 표시에 사용할 컬럼명 변경 (관리번호 -> PO No. / 견적 No.)
     combined_df.rename(columns={"PO_견적_번호": "PO No. / 견적 No."}, inplace=True)
     combined_df["정렬용_번호"] = combined_df["PO No. / 견적 No."].apply(lambda x: "ZZZ" if x == "-" else str(x))
 
@@ -456,21 +447,18 @@ def main():
             filtered_df["거래처"].astype(str).str.contains(search_text, case=False, na=False)
         ]
 
-    # 📌 1. 전체 KPI 카드
+    # 📌 1. 전체 KPI 카드 (3개 지표)
     total_sales = filtered_df["매출금액"].sum()
     order_sales = filtered_df[filtered_df["구분"] == "수주"]["매출금액"].sum()
     quote_sales = filtered_df[filtered_df["구분"] == "견적"]["매출금액"].sum()
-    total_row_count = len(filtered_df)
 
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1, kpi2, kpi3 = st.columns(3)
     with kpi1:
         st.metric("통합 총 매출규모", f"₩{total_sales:,.0f}", help=f"약 {total_sales / 1e8:.2f} 억원")
     with kpi2:
         st.metric("💼 수주 확정액", f"₩{order_sales:,.0f}", help=f"비중: {(order_sales/total_sales*100 if total_sales>0 else 0):.1f}%")
     with kpi3:
         st.metric("📋 견적 예상액", f"₩{quote_sales:,.0f}", help=f"비중: {(quote_sales/total_sales*100 if total_sales>0 else 0):.1f}%")
-    with kpi4:
-        st.metric("통합 집계 항목 수", f"{total_row_count:,} 건")
 
     if filtered_df.empty:
         st.warning("선택된 필터 조건에 해당하는 데이터가 없습니다.")
@@ -547,9 +535,9 @@ def main():
     st.plotly_chart(fig_monthly, use_container_width=True)
     st.markdown("---")
 
-    # 📋 4. 통합 테이블
+    # 📋 4. 통합 테이블 (건수 열 제거)
     st.subheader("📋 월별 세부 통합 실적 (수주 및 견적)")
-    st.caption("동일 월 내 거래처와 프로젝트명이 일치하는 건은 1행으로 합산되며 건수(N건)가 표시됩니다.")
+    st.caption("동일 월 내 거래처와 프로젝트명이 일치하는 건은 1행으로 통합 합산됩니다.")
 
     sorted_df = filtered_df.sort_values(
         by=["_년도_정렬키", "_월_정렬키", "구분", "정렬용_번호", "매출금액"],
@@ -557,7 +545,7 @@ def main():
     )
 
     display_cols = [
-        "구분", "수주현황", "PO No. / 견적 No.", "거래처", "프로젝트명", "건수", "내용", "매출년도", "매출월", "매출금액"
+        "구분", "수주현황", "PO No. / 견적 No.", "거래처", "프로젝트명", "내용", "매출년도", "매출월", "매출금액"
     ]
 
     table_rows = []
@@ -572,7 +560,6 @@ def main():
                     "PO No. / 견적 No.": r.get("PO No. / 견적 No.", "-"),
                     "거래처": r.get("거래처", "-"),
                     "프로젝트명": r.get("프로젝트명", "-"),
-                    "건수": r.get("건수", "-"),
                     "내용": r.get("내용", "-"),
                     "매출년도": y_disp,
                     "매출월": m_disp,
@@ -586,8 +573,7 @@ def main():
                 "수주현황": f"🔹 [{label_ym} 소계]",
                 "PO No. / 견적 No.": "-",
                 "거래처": "-",
-                "프로젝트명": f"[{label_ym} 전체 합계 ({len(group)}건)]",
-                "건수": "-",
+                "프로젝트명": f"[{label_ym} 전체 합계]",
                 "내용": "-",
                 "매출년도": y_disp,
                 "매출월": m_disp,
@@ -601,8 +587,7 @@ def main():
             "수주현황": f"🔶 [{y_disp} 연간 합계]",
             "PO No. / 견적 No.": "-",
             "거래처": "-",
-            "프로젝트명": f"[{y_disp} 총 합계 ({len(y_group)}건)]",
-            "건수": "-",
+            "프로젝트명": f"[{y_disp} 총 합계]",
             "내용": "-",
             "매출년도": y_disp,
             "매출월": "-",
@@ -615,8 +600,7 @@ def main():
         "수주현황": "🏆 [전체 총계]",
         "PO No. / 견적 No.": "-",
         "거래처": "-",
-        "프로젝트명": f"[전체 총계 ({len(filtered_df)}건)]",
-        "건수": "-",
+        "프로젝트명": "[전체 총계]",
         "내용": "-",
         "매출년도": "-",
         "매출월": "-",
@@ -665,7 +649,6 @@ def main():
             total_sales=total_sales,
             order_sales=order_sales,
             quote_sales=quote_sales,
-            total_row_count=total_row_count,
             yearly_summary=yearly_summary
         )
         st.download_button(
