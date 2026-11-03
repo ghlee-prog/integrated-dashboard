@@ -198,7 +198,7 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
     return html_content
 
 # ---------------------------------------------------------
-# 📥 1. 수주대장 로더 (매입확정단가 여부에 따른 마진 분기)
+# 📥 1. 수주대장 로더
 # ---------------------------------------------------------
 def load_order_ledger(folder_path="."):
     target_file = None
@@ -228,15 +228,12 @@ def load_order_ledger(folder_path="."):
             new_cols.append("내용")
         elif "매출단가" in c_str or "매출금액" in c_str or c_str == "매출":
             new_cols.append("매출금액")
-        # 1) 매입확정단가 매핑
         elif "매입확정" in c_str or ("매입" in c_str and "확정" in c_str) or "매입단가" in c_str:
             new_cols.append("매입확정단가")
-        # 2) 확정마진율 및 확정마진 매핑
         elif "확정마진율" in c_str or ("확정" in c_str and "마진율" in c_str):
             new_cols.append("확정마진율")
         elif "확정마진" in c_str or ("확정" in c_str and "마진" in c_str):
             new_cols.append("확정마진")
-        # 3) (예상)마진율 및 (예상)마진 매핑
         elif ("예상" in c_str and "마진율" in c_str) or "예상마진율" in c_str:
             new_cols.append("예상마진율")
         elif ("예상" in c_str and "마진" in c_str) or "예상마진" in c_str:
@@ -292,23 +289,24 @@ def load_order_ledger(folder_path="."):
     df["예상마진"] = df["예상마진"].apply(clean_numeric)
     df["예상마진율"] = df["예상마진율"].apply(clean_rate)
 
-    # 📌 매입확정단가가 0이면 (예상)마진/마진율, 0이 아니면 확정마진/마진율 적용
-    def decide_order_margin(r):
-        cost = r["매입확정단가"]
-        if cost == 0:
-            m_amt = r["예상마진"]
-            m_rate = r["예상마진율"]
-        else:
-            m_amt = r["확정마진"]
-            m_rate = r["확정마진율"]
+    # 매입확정단가가 0이면 (예상)마진/마진율, 아니면 확정마진/마진율 분기
+    def get_order_margin_amount(r):
+        return r["예상마진"] if r["매입확정단가"] == 0 else r["확정마진"]
 
-        if m_rate == 0.0 and r["매출금액"] > 0 and m_amt != 0:
-            m_rate = (m_amt / r["매출금액"]) * 100
-        return pd.Series([m_amt, m_rate], index=["마진금액", "마진율"])
+    def get_order_margin_rate(r):
+        rate = r["예상마진율"] if r["매입확정단가"] == 0 else r["확정마진율"]
+        if rate == 0.0 and r["매출금액"] > 0:
+            amt = get_order_margin_amount(r)
+            if amt != 0:
+                return (amt / r["매출금액"]) * 100
+        return rate
 
-    margin_series = df.apply(decide_order_margin, axis=1)
-    df["마진금액"] = margin_series["마진금액"]
-    df["마진율"] = margin_series["마진율"]
+    if not df.empty:
+        df["마진금액"] = df.apply(get_order_margin_amount, axis=1)
+        df["마진율"] = df.apply(get_order_margin_rate, axis=1)
+    else:
+        df["마진금액"] = 0.0
+        df["마진율"] = 0.0
 
     df = df[
         df["매출년도"].notna() &
@@ -334,7 +332,6 @@ def load_order_ledger(folder_path="."):
         "마진율": "mean"
     })
 
-    # 그룹 단위의 정확한 가중평균 마진율 산출
     df_grouped["마진율"] = df_grouped.apply(
         lambda r: (r["마진금액"] / r["매출금액"] * 100) if r["매출금액"] > 0 else r["마진율"],
         axis=1
@@ -343,7 +340,7 @@ def load_order_ledger(folder_path="."):
     return df_grouped
 
 # ---------------------------------------------------------
-# 📥 2. 견적대장 로더 ('(예상)마진' 및 '(예상)마진율' 매핑)
+# 📥 2. 견적대장 로더
 # ---------------------------------------------------------
 def load_quote_ledger(folder_path="."):
     target_file = None
@@ -445,7 +442,6 @@ def load_quote_ledger(folder_path="."):
         "마진율": "mean"
     })
 
-    # 그룹 단위의 정확한 가중평균 마진율 산출
     df_grouped["마진율"] = df_grouped.apply(
         lambda r: (r["마진금액"] / r["매출금액"] * 100) if r["매출금액"] > 0 else r["마진율"],
         axis=1
@@ -454,16 +450,22 @@ def load_quote_ledger(folder_path="."):
     return df_grouped
 
 # ---------------------------------------------------------
-# 📥 3. 두 대장 통합 로더
+# 📥 3. 두 대장 통합 로더 (캐시 키 갱신 및 컬럼 안전 보장)
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load_combined_data():
+def load_combined_dashboard_data():
     df_orders = load_order_ledger(".")
     df_quotes = load_quote_ledger(".")
 
     combined_df = pd.concat([df_orders, df_quotes], ignore_index=True)
     if combined_df.empty:
         raise FileNotFoundError("수주대장 또는 견적대장 엑셀 파일을 작업 폴더에서 찾을 수 없습니다.")
+
+    # 마진 관련 필수 컬럼 안전 보장
+    if "마진금액" not in combined_df.columns:
+        combined_df["마진금액"] = 0.0
+    if "마진율" not in combined_df.columns:
+        combined_df["마진율"] = 0.0
 
     combined_df.rename(columns={"PO_견적_번호": "PO No. / 견적 No."}, inplace=True)
     combined_df["정렬용_번호"] = combined_df["PO No. / 견적 No."].apply(lambda x: "ZZZ" if x == "-" else str(x))
@@ -502,11 +504,16 @@ def main():
     st.markdown("---")
 
     try:
-        df = load_combined_data()
+        df = load_combined_dashboard_data()
     except Exception as e:
         st.error(f"데이터 로드 실패: {e}")
         st.info("작업 폴더 안에 '수주대장' 및 '견적대장' 엑셀(.xlsx) 파일이 있는지 확인해 주세요.")
         st.stop()
+
+    # 구버전 캐시 감지 시 자동 갱신
+    if "마진금액" not in df.columns or "마진율" not in df.columns:
+        st.cache_data.clear()
+        st.rerun()
 
     # 🔍 사이드바 검색 및 필터
     st.sidebar.header("🔍 통합 대시보드 필터")
@@ -547,7 +554,7 @@ def main():
             filtered_df["거래처"].astype(str).str.contains(search_text, case=False, na=False)
         ]
 
-    # 📌 1. 전체 KPI 카드 (마진금액 및 평균 마진율)
+    # 📌 1. 전체 KPI 카드
     total_sales = filtered_df["매출금액"].sum()
     order_sales = filtered_df[filtered_df["구분"] == "수주"]["매출금액"].sum()
     quote_sales = filtered_df[filtered_df["구분"] == "견적"]["매출금액"].sum()
@@ -639,7 +646,7 @@ def main():
     st.plotly_chart(fig_monthly, use_container_width=True)
     st.markdown("---")
 
-    # 📋 4. 통합 테이블 (마진금액 옆에 마진율 포함)
+    # 📋 4. 통합 테이블
     st.subheader("📋 월별 세부 통합 실적 (수주 및 견적)")
     st.caption("동일 월 내 거래처와 프로젝트명이 일치하는 건은 1행으로 통합 합산됩니다.")
 
