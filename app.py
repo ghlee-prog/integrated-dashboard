@@ -74,7 +74,35 @@ def get_first_valid(series):
             return str(v).strip()
     return "-"
 
-def generate_printable_html(integrated_df, display_cols, total_sales, order_sales, quote_sales, yearly_summary):
+def clean_numeric(val):
+    """쉼표(,), 원화(₩), 괄호 음수 표기 등을 안전하게 숫자로 변환"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace(',', '').replace('₩', '').replace('원', '').strip()
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+def clean_rate(val):
+    """백분율(%) 표기 또는 소수점 비율을 일관된 % 단위 숫자로 변환 (예: 0.15 -> 15.0)"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        v = float(val)
+        return v * 100 if 0 < abs(v) <= 1.0 else v
+    s = str(val).replace('%', '').replace(',', '').strip()
+    try:
+        v = float(s)
+        return v * 100 if 0 < abs(v) <= 1.0 else v
+    except (ValueError, TypeError):
+        return 0.0
+
+def generate_printable_html(integrated_df, display_cols, total_sales, order_sales, quote_sales, total_margin, yearly_summary):
     rows_html = []
     for _, r in integrated_df.iterrows():
         row_type = r.get("_row_type", "data")
@@ -90,8 +118,11 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
         tds = []
         for col in display_cols:
             val = r.get(col, "")
-            if col == "매출금액":
+            if col in ["매출금액", "마진금액"]:
                 val_str = f"₩{val:,.0f}" if isinstance(val, (int, float)) else str(val)
+                align = 'style="text-align: right;"'
+            elif col == "마진율":
+                val_str = f"{val:.1f}%" if isinstance(val, (int, float)) else str(val)
                 align = 'style="text-align: right;"'
             elif col in ["프로젝트명", "내용"]:
                 val_str = str(val)
@@ -118,6 +149,8 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
             <div style="font-size: 9.5px; color: #64748b; margin-top: 3px;">약 {y_amt/1e8:.2f}억 ({y_ratio:.1f}%)</div>
         </div>
         """
+
+    avg_margin_rate = (total_margin / total_sales * 100) if total_sales > 0 else 0
 
     html_content = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -153,6 +186,7 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
         <div class="kpi-card"><div class="kpi-title">통합 총 매출규모</div><div class="kpi-value">₩{total_sales:,.0f}</div></div>
         <div class="kpi-card"><div class="kpi-title">💼 수주 확정액</div><div class="kpi-value">₩{order_sales:,.0f}</div></div>
         <div class="kpi-card"><div class="kpi-title">📋 견적 예상액</div><div class="kpi-value">₩{quote_sales:,.0f}</div></div>
+        <div class="kpi-card"><div class="kpi-title">💰 총 마진금액 (마진율)</div><div class="kpi-value">₩{total_margin:,.0f} ({avg_margin_rate:.1f}%)</div></div>
         {yearly_cards_html}
     </div>
     <table>
@@ -164,7 +198,7 @@ def generate_printable_html(integrated_df, display_cols, total_sales, order_sale
     return html_content
 
 # ---------------------------------------------------------
-# 📥 1. 수주대장 로더
+# 📥 1. 수주대장 로더 (매입확정단가 여부에 따른 마진 분기)
 # ---------------------------------------------------------
 def load_order_ledger(folder_path="."):
     target_file = None
@@ -187,20 +221,33 @@ def load_order_ledger(folder_path="."):
     df_raw = pd.read_excel(target_file, sheet_name=0, header=header_idx)
     new_cols = []
     for c in df_raw.columns:
-        c_str = str(c).replace('\n', '').strip()
+        c_str = str(c).replace('\n', '').replace(' ', '').strip()
         if "진행현황" in c_str or "수주현황" in c_str:
             new_cols.append("수주현황")
         elif "내용" in c_str or "품명" in c_str:
             new_cols.append("내용")
-        elif "매출 단가" in c_str or "매출단가" in c_str or "매출금액" in c_str:
+        elif "매출단가" in c_str or "매출금액" in c_str or c_str == "매출":
             new_cols.append("매출금액")
+        # 1) 매입확정단가 매핑
+        elif "매입확정" in c_str or ("매입" in c_str and "확정" in c_str) or "매입단가" in c_str:
+            new_cols.append("매입확정단가")
+        # 2) 확정마진율 및 확정마진 매핑
+        elif "확정마진율" in c_str or ("확정" in c_str and "마진율" in c_str):
+            new_cols.append("확정마진율")
+        elif "확정마진" in c_str or ("확정" in c_str and "마진" in c_str):
+            new_cols.append("확정마진")
+        # 3) (예상)마진율 및 (예상)마진 매핑
+        elif ("예상" in c_str and "마진율" in c_str) or "예상마진율" in c_str:
+            new_cols.append("예상마진율")
+        elif ("예상" in c_str and "마진" in c_str) or "예상마진" in c_str:
+            new_cols.append("예상마진")
         elif "매출년도" in c_str or "매출예정년도" in c_str:
             new_cols.append("매출년도")
         elif "매출월" in c_str or "매출예정월" in c_str:
             new_cols.append("매출월")
         elif "수주처" in c_str or "견적처" in c_str:
             new_cols.append("거래처")
-        elif "PO NO" in c_str.upper() or "PONO" in c_str.upper():
+        elif "PONO" in c_str.upper():
             new_cols.append("PO_견적_번호")
         else:
             new_cols.append(c_str)
@@ -220,7 +267,12 @@ def load_order_ledger(folder_path="."):
         "내용": "-",
         "매출년도": "미정",
         "매출월": "미정",
-        "매출금액": 0
+        "매출금액": 0,
+        "매입확정단가": 0,
+        "확정마진": 0,
+        "확정마진율": 0.0,
+        "예상마진": 0,
+        "예상마진율": 0.0
     }
     for col, default_val in defaults.items():
         if col not in df.columns:
@@ -232,7 +284,31 @@ def load_order_ledger(folder_path="."):
     df["매출년도"] = df["매출년도"].astype(str).str.strip()
     df["매출월"] = df["매출월"].astype(str).str.strip()
     df["거래처"] = df["거래처"].astype(str).str.strip()
-    df["매출금액"] = pd.to_numeric(df["매출금액"], errors="coerce").fillna(0)
+
+    df["매출금액"] = df["매출금액"].apply(clean_numeric)
+    df["매입확정단가"] = df["매입확정단가"].apply(clean_numeric)
+    df["확정마진"] = df["확정마진"].apply(clean_numeric)
+    df["확정마진율"] = df["확정마진율"].apply(clean_rate)
+    df["예상마진"] = df["예상마진"].apply(clean_numeric)
+    df["예상마진율"] = df["예상마진율"].apply(clean_rate)
+
+    # 📌 매입확정단가가 0이면 (예상)마진/마진율, 0이 아니면 확정마진/마진율 적용
+    def decide_order_margin(r):
+        cost = r["매입확정단가"]
+        if cost == 0:
+            m_amt = r["예상마진"]
+            m_rate = r["예상마진율"]
+        else:
+            m_amt = r["확정마진"]
+            m_rate = r["확정마진율"]
+
+        if m_rate == 0.0 and r["매출금액"] > 0 and m_amt != 0:
+            m_rate = (m_amt / r["매출금액"]) * 100
+        return pd.Series([m_amt, m_rate], index=["마진금액", "마진율"])
+
+    margin_series = df.apply(decide_order_margin, axis=1)
+    df["마진금액"] = margin_series["마진금액"]
+    df["마진율"] = margin_series["마진율"]
 
     df = df[
         df["매출년도"].notna() &
@@ -253,13 +329,21 @@ def load_order_ledger(folder_path="."):
         "PO_견적_번호": combine_unique_po,
         "프로젝트명": get_representative_project_name,
         "내용": combine_unique,
-        "매출금액": "sum"
+        "매출금액": "sum",
+        "마진금액": "sum",
+        "마진율": "mean"
     })
+
+    # 그룹 단위의 정확한 가중평균 마진율 산출
+    df_grouped["마진율"] = df_grouped.apply(
+        lambda r: (r["마진금액"] / r["매출금액"] * 100) if r["매출금액"] > 0 else r["마진율"],
+        axis=1
+    )
 
     return df_grouped
 
 # ---------------------------------------------------------
-# 📥 2. 견적대장 로더
+# 📥 2. 견적대장 로더 ('(예상)마진' 및 '(예상)마진율' 매핑)
 # ---------------------------------------------------------
 def load_quote_ledger(folder_path="."):
     target_file = None
@@ -282,17 +366,21 @@ def load_quote_ledger(folder_path="."):
     df_raw = pd.read_excel(target_file, sheet_name=0, header=header_idx)
     new_cols = []
     for c in df_raw.columns:
-        c_str = str(c).replace('\n', '').strip()
+        c_str = str(c).replace('\n', '').replace(' ', '').strip()
         if "수주현황" in c_str:
             new_cols.append("수주현황")
-        elif "견적 NO" in c_str or "견적NO" in c_str or "견적번호" in c_str:
+        elif "견적NO" in c_str or "견적번호" in c_str:
             new_cols.append("PO_견적_번호")
         elif "견적처" in c_str or "수주처" in c_str:
             new_cols.append("거래처")
         elif "내용" in c_str or "품명" in c_str or "품목" in c_str:
             new_cols.append("내용")
-        elif "매출금액" in c_str or "매출 단가" in c_str or "매출단가" in c_str:
+        elif "매출금액" in c_str or "매출단가" in c_str or c_str == "매출":
             new_cols.append("매출금액")
+        elif ("예상" in c_str and "마진율" in c_str) or "예상마진율" in c_str or "마진율" in c_str:
+            new_cols.append("마진율")
+        elif ("예상" in c_str and "마진" in c_str) or "예상마진" in c_str or "마진금액" in c_str or "마진액" in c_str or c_str == "마진":
+            new_cols.append("마진금액")
         elif "매출예정년도" in c_str or "매출년도" in c_str:
             new_cols.append("매출년도")
         elif "매출예정월" in c_str or "매출월" in c_str:
@@ -315,7 +403,9 @@ def load_quote_ledger(folder_path="."):
         "내용": "-",
         "매출년도": "미정",
         "매출월": "미정",
-        "매출금액": 0
+        "매출금액": 0,
+        "마진금액": 0,
+        "마진율": 0.0
     }
     for col, default_val in defaults.items():
         if col not in df.columns:
@@ -327,7 +417,9 @@ def load_quote_ledger(folder_path="."):
     df["매출년도"] = df["매출년도"].astype(str).str.strip()
     df["매출월"] = df["매출월"].astype(str).str.strip()
     df["거래처"] = df["거래처"].astype(str).str.strip()
-    df["매출금액"] = pd.to_numeric(df["매출금액"], errors="coerce").fillna(0)
+    df["매출금액"] = df["매출금액"].apply(clean_numeric)
+    df["마진금액"] = df["마진금액"].apply(clean_numeric)
+    df["마진율"] = df["마진율"].apply(clean_rate)
 
     df = df[
         df["매출년도"].notna() &
@@ -348,8 +440,16 @@ def load_quote_ledger(folder_path="."):
         "PO_견적_번호": combine_unique_po,
         "프로젝트명": get_representative_project_name,
         "내용": combine_unique,
-        "매출금액": "sum"
+        "매출금액": "sum",
+        "마진금액": "sum",
+        "마진율": "mean"
     })
+
+    # 그룹 단위의 정확한 가중평균 마진율 산출
+    df_grouped["마진율"] = df_grouped.apply(
+        lambda r: (r["마진금액"] / r["매출금액"] * 100) if r["매출금액"] > 0 else r["마진율"],
+        axis=1
+    )
 
     return df_grouped
 
@@ -447,18 +547,22 @@ def main():
             filtered_df["거래처"].astype(str).str.contains(search_text, case=False, na=False)
         ]
 
-    # 📌 1. 전체 KPI 카드 (3개 지표)
+    # 📌 1. 전체 KPI 카드 (마진금액 및 평균 마진율)
     total_sales = filtered_df["매출금액"].sum()
     order_sales = filtered_df[filtered_df["구분"] == "수주"]["매출금액"].sum()
     quote_sales = filtered_df[filtered_df["구분"] == "견적"]["매출금액"].sum()
+    total_margin = filtered_df["마진금액"].sum()
+    avg_margin_rate = (total_margin / total_sales * 100) if total_sales > 0 else 0
 
-    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("통합 총 매출규모", f"₩{total_sales:,.0f}", help=f"약 {total_sales / 1e8:.2f} 억원")
     with kpi2:
         st.metric("💼 수주 확정액", f"₩{order_sales:,.0f}", help=f"비중: {(order_sales/total_sales*100 if total_sales>0 else 0):.1f}%")
     with kpi3:
         st.metric("📋 견적 예상액", f"₩{quote_sales:,.0f}", help=f"비중: {(quote_sales/total_sales*100 if total_sales>0 else 0):.1f}%")
+    with kpi4:
+        st.metric("💰 총 마진금액", f"₩{total_margin:,.0f}", help=f"평균 마진율: {avg_margin_rate:.1f}%")
 
     if filtered_df.empty:
         st.warning("선택된 필터 조건에 해당하는 데이터가 없습니다.")
@@ -535,7 +639,7 @@ def main():
     st.plotly_chart(fig_monthly, use_container_width=True)
     st.markdown("---")
 
-    # 📋 4. 통합 테이블 (건수 열 제거)
+    # 📋 4. 통합 테이블 (마진금액 옆에 마진율 포함)
     st.subheader("📋 월별 세부 통합 실적 (수주 및 견적)")
     st.caption("동일 월 내 거래처와 프로젝트명이 일치하는 건은 1행으로 통합 합산됩니다.")
 
@@ -545,7 +649,7 @@ def main():
     )
 
     display_cols = [
-        "구분", "수주현황", "PO No. / 견적 No.", "거래처", "프로젝트명", "내용", "매출년도", "매출월", "매출금액"
+        "구분", "수주현황", "PO No. / 견적 No.", "거래처", "프로젝트명", "내용", "매출년도", "매출월", "매출금액", "마진금액", "마진율"
     ]
 
     table_rows = []
@@ -554,6 +658,10 @@ def main():
             label_ym = f"{y_disp} {m_disp}".strip()
 
             for _, r in group.iterrows():
+                sales_val = r.get("매출금액", 0)
+                margin_val = r.get("마진금액", 0)
+                rate_val = (margin_val / sales_val * 100) if sales_val > 0 else r.get("마진율", 0.0)
+
                 table_rows.append({
                     "구분": r.get("구분", "-"),
                     "수주현황": r.get("수주현황", "-"),
@@ -563,11 +671,15 @@ def main():
                     "내용": r.get("내용", "-"),
                     "매출년도": y_disp,
                     "매출월": m_disp,
-                    "매출금액": r.get("매출금액", 0),
+                    "매출금액": sales_val,
+                    "마진금액": margin_val,
+                    "마진율": rate_val,
                     "_row_type": "data"
                 })
 
             sub_sales = group["매출금액"].sum()
+            sub_margin = group["마진금액"].sum()
+            sub_rate = (sub_margin / sub_sales * 100) if sub_sales > 0 else 0.0
             table_rows.append({
                 "구분": "소계",
                 "수주현황": f"🔹 [{label_ym} 소계]",
@@ -578,10 +690,14 @@ def main():
                 "매출년도": y_disp,
                 "매출월": m_disp,
                 "매출금액": sub_sales,
+                "마진금액": sub_margin,
+                "마진율": sub_rate,
                 "_row_type": "month_subtotal"
             })
 
         year_sales = y_group["매출금액"].sum()
+        year_margin = y_group["마진금액"].sum()
+        year_rate = (year_margin / year_sales * 100) if year_sales > 0 else 0.0
         table_rows.append({
             "구분": "연간합계",
             "수주현황": f"🔶 [{y_disp} 연간 합계]",
@@ -592,9 +708,12 @@ def main():
             "매출년도": y_disp,
             "매출월": "-",
             "매출금액": year_sales,
+            "마진금액": year_margin,
+            "마진율": year_rate,
             "_row_type": "year_total"
         })
 
+    total_rate = (total_margin / total_sales * 100) if total_sales > 0 else 0.0
     table_rows.append({
         "구분": "총계",
         "수주현황": "🏆 [전체 총계]",
@@ -605,6 +724,8 @@ def main():
         "매출년도": "-",
         "매출월": "-",
         "매출금액": total_sales,
+        "마진금액": total_margin,
+        "마진율": total_rate,
         "_row_type": "grand_total"
     })
 
@@ -625,7 +746,11 @@ def main():
     styled_table = (
         integrated_df[display_cols + ["_row_type"]]
         .style.apply(highlight_rows, axis=1)
-        .format({"매출금액": "₩{:,.0f}"})
+        .format({
+            "매출금액": "₩{:,.0f}",
+            "마진금액": "₩{:,.0f}",
+            "마진율": "{:.1f}%"
+        })
         .hide(subset=["_row_type"], axis="columns")
     )
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
@@ -649,6 +774,7 @@ def main():
             total_sales=total_sales,
             order_sales=order_sales,
             quote_sales=quote_sales,
+            total_margin=total_margin,
             yearly_summary=yearly_summary
         )
         st.download_button(
